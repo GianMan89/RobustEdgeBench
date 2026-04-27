@@ -12,7 +12,9 @@ Thumbs.db
 !/data/raw/.gitkeep
 /data/processed/**
 !/data/processed/.gitkeep
-/outputs/**
+#/outputs/**
 !/outputs/.gitkeep
 *.joblib
 *.pkl
+*.csv
+*.json
