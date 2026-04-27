@@ -51,6 +51,24 @@ def load_config(path: str | Path = "configs/default.yaml") -> dict[str, Any]:
     """Load YAML configuration."""
     with Path(path).open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+    
+
+def _write_csv(df: pd.DataFrame, path: str | Path, columns: list[str] | None = None) -> None:
+    """Write a CSV file robustly.
+
+    The function always creates the file. If the DataFrame is empty and
+    expected columns are provided, it writes an empty CSV with headers. This
+    avoids confusing FileNotFoundError / EmptyDataError situations in notebooks.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if df is None:
+        df = pd.DataFrame(columns=columns or [])
+    elif df.empty and columns is not None:
+        df = df.reindex(columns=columns)
+
+    df.to_csv(path, index=False)
 
 
 def build_features(data_root: str | Path, config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, list[RunData]]:
@@ -236,41 +254,94 @@ def _fit_one_view_one_split(
     return metrics, scores
 
 
-def fit_evaluate(features: pd.DataFrame, runs: list[RunData], config: dict[str, Any], output_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Train/evaluate all configured feature views and CV splits."""
+def fit_evaluate(
+    features: pd.DataFrame,
+    runs: list[RunData],
+    config: dict[str, Any],
+    output_dir: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Train/evaluate all configured feature views and CV splits.
+
+    Canonical output files written by this function:
+
+    - metrics_by_run_all_splits.csv
+    - scores_by_window_all_splits.csv
+    - metrics_by_run.csv
+    - scores_by_window.csv
+    - metrics_aggregated.csv
+    - metrics_window_pooled_by_duration.csv
+    - metrics_window_pooled_all_attacks.csv
+    - robustness_summary.csv
+
+    No legacy v2/v3 aliases are written.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "models").mkdir(exist_ok=True)
 
     splits = make_clean_benign_cv_splits(features)
     views = configured_feature_views(config)
+
     print(f"[INFO] using feature views: {views}")
     print(f"[INFO] using {len(splits)} leave-one-clean-benign-out splits")
 
-    all_metrics, all_scores = [], []
+    all_metrics: list[pd.DataFrame] = []
+    all_scores: list[pd.DataFrame] = []
+
     for split in splits:
         for view in views:
-            metrics, scores = _fit_one_view_one_split(features, runs, config, output_dir, view, split)
+            metrics, scores = _fit_one_view_one_split(
+                features=features,
+                runs=runs,
+                config=config,
+                output_dir=output_dir,
+                feature_view=view,
+                split=split,
+            )
+
             if not metrics.empty:
                 all_metrics.append(metrics)
+
             if not scores.empty:
                 all_scores.append(scores)
 
     metrics_all = pd.concat(all_metrics, ignore_index=True) if all_metrics else pd.DataFrame()
     scores_all = pd.concat(all_scores, ignore_index=True) if all_scores else pd.DataFrame()
 
-    # Main evaluation excludes training runs. Validation clean-benign runs are
-    # retained as lambda=0 benign references for each split; all phase2--phase4
-    # runs are true test runs.
-    metrics = metrics_all[metrics_all["split_role"] != "train"].copy() if not metrics_all.empty else metrics_all
-    scores = scores_all[scores_all["split_role"] != "train"].copy() if not scores_all.empty else scores_all
+    # Main evaluation excludes training runs.
+    #
+    # Validation clean-benign runs are retained because they provide the
+    # lambda=0 benign reference for each split. All phase2--phase4 runs are
+    # test runs by construction.
+    if not metrics_all.empty:
+        metrics = metrics_all[metrics_all["split_role"] != "train"].copy()
+    else:
+        metrics = pd.DataFrame()
 
-    agg = aggregate_metrics(metrics)
-    window_by_duration = aggregate_window_metrics(scores, float(config.get("features", {}).get("sysdig_window_seconds", 4.0)), group_by_attack_duration=True)
-    window_pooled = aggregate_window_metrics(scores, float(config.get("features", {}).get("sysdig_window_seconds", 4.0)), group_by_attack_duration=False)
+    if not scores_all.empty:
+        scores = scores_all[scores_all["split_role"] != "train"].copy()
+    else:
+        scores = pd.DataFrame()
 
-    summary_frames = []
-    for metric, hib in [
+    # Aggregated metrics.
+    agg = aggregate_metrics(metrics) if not metrics.empty else pd.DataFrame()
+
+    window_by_duration = aggregate_window_metrics(
+        scores,
+        float(config.get("features", {}).get("sysdig_window_seconds", 4.0)),
+        group_by_attack_duration=True,
+    ) if not scores.empty else pd.DataFrame()
+
+    window_pooled = aggregate_window_metrics(
+        scores,
+        float(config.get("features", {}).get("sysdig_window_seconds", 4.0)),
+        group_by_attack_duration=False,
+    ) if not scores.empty else pd.DataFrame()
+
+    # Robustness summaries.
+    summary_frames: list[pd.DataFrame] = []
+
+    for metric, higher_is_better in [
         ("event_recall_mean", True),
         ("attack_window_recall_percent_mean", True),
         ("auroc_mean", True),
@@ -279,17 +350,56 @@ def fit_evaluate(features: pd.DataFrame, runs: list[RunData], config: dict[str, 
         ("median_ttd_s_mean", False),
     ]:
         if metric in agg.columns:
-            summary_frames.append(robustness_summary(agg, metric=metric, higher_is_better=hib))
+            tmp = robustness_summary(
+                agg,
+                metric=metric,
+                higher_is_better=higher_is_better,
+            )
+            if not tmp.empty:
+                summary_frames.append(tmp)
+
     summary = pd.concat(summary_frames, ignore_index=True) if summary_frames else pd.DataFrame()
 
-    metrics_all.to_csv(output_dir / "metrics_by_run_all_splits.csv", index=False)
-    scores_all.to_csv(output_dir / "scores_by_window_all_splits.csv", index=False)
-    metrics.to_csv(output_dir / "metrics_by_run.csv", index=False)
-    scores.to_csv(output_dir / "scores_by_window.csv", index=False)
-    agg.to_csv(output_dir / "metrics_aggregated_by_run.csv", index=False)
-    window_by_duration.to_csv(output_dir / "metrics_window_pooled_by_duration.csv", index=False)
-    window_pooled.to_csv(output_dir / "metrics_window_pooled_all_attacks.csv", index=False)
-    summary.to_csv(output_dir / "robustness_summary.csv", index=False)
+    # ------------------------------------------------------------------
+    # Canonical output files
+    # ------------------------------------------------------------------
+
+    _write_csv(metrics_all, output_dir / "metrics_by_run_all_splits.csv")
+    _write_csv(scores_all, output_dir / "scores_by_window_all_splits.csv")
+
+    _write_csv(metrics, output_dir / "metrics_by_run.csv")
+    _write_csv(scores, output_dir / "scores_by_window.csv")
+
+    _write_csv(agg, output_dir / "metrics_aggregated.csv")
+
+    _write_csv(
+        window_by_duration,
+        output_dir / "metrics_window_pooled_by_duration.csv",
+    )
+
+    _write_csv(
+        window_pooled,
+        output_dir / "metrics_window_pooled_all_attacks.csv",
+    )
+
+    _write_csv(
+        summary,
+        output_dir / "robustness_summary.csv",
+        columns=[
+            "feature_view",
+            "detector",
+            "perturbation_family",
+            "attack_duration",
+            "attack_intensity",
+            "metric",
+            "higher_is_better",
+            "R_avg",
+            "R_worst",
+            "R_prod",
+            "n_severity_points",
+        ],
+    )
+
     return metrics, scores, agg, window_by_duration, window_pooled
 
 
@@ -416,18 +526,58 @@ def make_metric_distribution_figures(metrics: pd.DataFrame, output_dir: str | Pa
                 )
 
 
-def run_end_to_end(data_root: str | Path, output_dir: str | Path, config_path: str | Path = "configs/default.yaml") -> None:
-    """Run the complete analysis workflow."""
+def run_end_to_end(
+    data_root: str | Path,
+    output_dir: str | Path,
+    config_path: str | Path = "configs/default.yaml",
+) -> None:
+    """Run the complete analysis workflow.
+
+    This function writes one canonical set of output files:
+
+    - manifest.csv
+    - features.csv
+    - metrics_by_run.csv
+    - metrics_by_run_all_splits.csv
+    - scores_by_window.csv
+    - scores_by_window_all_splits.csv
+    - metrics_aggregated.csv
+    - metrics_window_pooled_all_attacks.csv
+    - metrics_window_pooled_by_duration.csv
+    - robustness_summary.csv
+    """
     config = load_config(config_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    print("[INFO] building features")
     features, manifest, runs = build_features(data_root, config)
-    manifest.to_csv(output_dir / "manifest.csv", index=False)
-    features.to_csv(output_dir / "features.csv", index=False)
 
-    metrics, scores, agg, window_by_duration, window_pooled = fit_evaluate(features, runs, config, output_dir)
+    _write_csv(manifest, output_dir / "manifest.csv")
+    _write_csv(features, output_dir / "features.csv")
+
+    print("[INFO] fitting models and evaluating")
+    metrics, scores, agg, window_by_duration, window_pooled = fit_evaluate(
+        features=features,
+        runs=runs,
+        config=config,
+        output_dir=output_dir,
+    )
+
     _print_metric_overview(metrics, window_pooled)
-    make_figures(agg, window_pooled, scores, output_dir, config)
-    make_metric_distribution_figures(metrics, output_dir)
+
+    print("[INFO] creating figures")
+    make_figures(
+        agg=agg,
+        window_pooled=window_pooled,
+        scores=scores,
+        output_dir=output_dir,
+        config=config,
+    )
+
+    make_metric_distribution_figures(
+        metrics=metrics,
+        output_dir=output_dir,
+    )
+
     print(f"[INFO] wrote outputs to {output_dir}")
