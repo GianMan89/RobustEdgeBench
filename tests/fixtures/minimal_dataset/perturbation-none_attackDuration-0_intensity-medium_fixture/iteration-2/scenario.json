@@ -1,0 +1,11 @@
+{
+  "perturbation": "none",
+  "perturbation_family": "none",
+  "perturbation_profile": "none",
+  "severity": 0.0,
+  "attack_duration": 0,
+  "attack_intensity": "medium",
+  "iteration": 2,
+  "test_duration": 120,
+  "attack_start_delay": 40
+}

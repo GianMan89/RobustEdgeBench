@@ -1,0 +1,59 @@
+# Default analysis configuration for RobustEdgeBench.
+# Paths can be overridden in notebooks or CLI arguments.
+
+paths:
+  data_root: data/raw/logs
+  output_dir: outputs/etfa_baseline
+
+features:
+  primary_view: sysdig
+  sysdig_window_seconds: 4.0
+  include_process_features: false
+  min_nonzero_variance: true
+  log1p_counts: true
+  standardize: true
+
+scenario:
+  # Used only when scenario.json contains categorical profiles instead of explicit severity values.
+  profile_to_severity:
+    none: 0.0
+    light: 0.25
+    moderate: 0.50
+    heavy: 1.0
+
+splits:
+  train_fraction_clean_benign: 0.70
+  random_seed: 42
+
+calibration:
+  # High quantile of benign validation scores. 0.995 means roughly 0.5% of benign validation windows
+  # are allowed above threshold under the chosen operating point.
+  target_fpr_quantile: 0.995
+
+models:
+  random_state: 42
+  include_autoencoder: true
+  pca:
+    n_components: 0.95
+  gmm:
+    n_components: 2
+    covariance_type: diag
+  ocsvm:
+    kernel: rbf
+    nu: 0.05
+    gamma: scale
+  isolation_forest:
+    n_estimators: 300
+    contamination: auto
+  autoencoder:
+    hidden_layer_sizes: [64, 16, 64]
+    max_iter: 300
+
+metrics:
+  primary:
+    - false_alarms_per_hour
+    - event_recall
+    - median_ttd_s
+  secondary:
+    - auroc
+    - auprc
