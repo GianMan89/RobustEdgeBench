@@ -240,19 +240,6 @@ robustedge-bench/
     test_metrics.py
 ```
 
----
-
-## Data release note
-
-The repository is designed to work with data tracked separately via Git LFS, Zenodo, OSF, or an institutional data repository. For public release, avoid committing large raw log folders directly to Git. Instead, provide:
-
-1. a stable dataset DOI or release archive,
-2. checksums for archives,
-3. a manifest listing run folders and scenario metadata,
-4. the exact code commit used for the paper.
-
----
-
 ## Citation
 
 A `CITATION.cff` file is included as a placeholder. Please update title, authors, DOI, and repository URL once the public release is finalized.
