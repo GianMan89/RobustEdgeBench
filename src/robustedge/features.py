@@ -1,9 +1,26 @@
-"""Feature extraction for runtime, process and controller views."""
+"""Feature extraction for runtime, process and controller views.
+
+The detector input is built on the sysdig runtime windows.  Sysdig provides
+one row per monitoring window and is therefore used as the alignment anchor.
+Process telemetry and controller commands are aligned to these windows using a
+backward as-of join: each detector window receives the most recent process or
+controller value available at or before the sysdig timestamp.
+
+The default feature prefixes are:
+
+``rt_``
+    Runtime/sysdig bag-of-system-call features.
+``proc_``
+    TEP process telemetry features aligned to sysdig windows.
+``ctrl_``
+    Controller command/audit features aligned to sysdig windows.
+``alarm_``
+    Optional alarm-event diagnostic features. Disabled by default.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -15,59 +32,65 @@ from .labels import add_window_labels, attack_intervals_from_run
 
 
 def _sanitize(name: str) -> str:
+    """Convert arbitrary tag/field names into stable feature-name fragments."""
     name = str(name).strip().replace(" ", "_").replace("/", "_").replace("-", "_")
     name = name.replace(".", "_").replace(":", "_").replace("%", "pct")
     return "".join(ch for ch in name if ch.isalnum() or ch == "_")
 
 
-def _relative_times_from_df(df: pd.DataFrame, fallback_window_seconds: float) -> tuple[pd.Series, pd.Timestamp | None]:
-    """Return timestamps and run-start timestamp for a DataFrame."""
-    time_col = infer_time_column(df)
-    if time_col is None:
-        ts = pd.Series(pd.NaT, index=df.index)
-        return ts, None
-    ts = parse_timestamps(df[time_col])
-    start = ts.min() if not ts.isna().all() else None
-    return ts, start
-
 def _asof_time(series: pd.Series) -> pd.Series:
-    """Normalize timestamps for pandas.merge_asof.
+    """Normalize timestamps for ``pandas.merge_asof``.
 
-    pandas.merge_asof requires exactly matching datetime dtypes on the
-    left and right merge keys. Depending on JSON parsing and pandas version,
-    timestamps may become datetime64[ns, UTC] in one stream and
-    datetime64[us, UTC] in another. We normalize all merge keys to
-    timezone-naive UTC nanoseconds.
+    ``merge_asof`` requires the left and right keys to have exactly the same
+    dtype.  Depending on pandas version and the input schema, one stream may be
+    parsed as ``datetime64[ns, UTC]`` and another as ``datetime64[us, UTC]``.
+    This helper normalizes all alignment keys to timezone-naive UTC
+    ``datetime64[ns]``.
     """
     ts = pd.to_datetime(series, utc=True, errors="coerce")
-
-    # Convert timezone-aware UTC timestamps to timezone-naive UTC.
     if pd.api.types.is_datetime64tz_dtype(ts.dtype):
         ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
-
     return ts.astype("datetime64[ns]")
 
 
-def _anchor_times(anchor: pd.DataFrame, fallback_start: pd.Timestamp) -> pd.Series:
-    """Return merge-ready anchor timestamps for feature alignment.
+def _relative_times_from_df(df: pd.DataFrame, fallback_window_seconds: float) -> tuple[pd.Series, pd.Timestamp | None]:
+    """Return normalized timestamps and run-start timestamp for a DataFrame."""
+    time_col = infer_time_column(df)
+    if time_col is None:
+        ts = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        return ts, None
+    ts = _asof_time(parse_timestamps(df[time_col]))
+    start = ts.min() if not ts.isna().all() else None
+    return ts, start
 
-    If the runtime anchor contains valid timestamps, use them. Otherwise,
-    reconstruct anchor timestamps from the fallback start time and window_end.
+
+def _anchor_times(anchor: pd.DataFrame, fallback_start: pd.Timestamp) -> pd.Series:
+    """Return merge-ready sysdig-window anchor timestamps.
+
+    If the runtime table has valid timestamps, they are normalized and used.
+    Otherwise, anchor timestamps are reconstructed from ``window_end`` relative
+    to ``fallback_start``.
     """
     if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all():
-        anchor_ts = _asof_time(anchor["timestamp"])
-        if anchor_ts.notna().all():
-            return anchor_ts
-
+        ts = _asof_time(anchor["timestamp"])
+        if ts.notna().any():
+            return ts
     return pd.Series(
         fallback_start + pd.to_timedelta(anchor["window_end"].to_numpy(), unit="s"),
         index=anchor.index,
-    ).astype("datetime64[ns]")
+        dtype="datetime64[ns]",
+    )
 
 
 @dataclass
 class RuntimeSysdigExtractor:
-    """Extract bag-of-system-call features from sysdig windows."""
+    """Extract bag-of-system-call features from ``sysdig_logs.ndjson``.
+
+    This follows the feature idea of the ABB zero-day container paper: each
+    fixed time window is represented by counts of system-call types.  In the
+    current data, syscalls are typically stored in flattened columns such as
+    ``fields.write`` after NDJSON normalization.
+    """
 
     window_seconds: float = 4.0
 
@@ -75,6 +98,7 @@ class RuntimeSysdigExtractor:
         df = run.sysdig.copy()
         if df.empty:
             return pd.DataFrame()
+
         ts, start = _relative_times_from_df(df, self.window_seconds)
         numeric = pd.DataFrame(index=df.index)
 
@@ -82,7 +106,8 @@ class RuntimeSysdigExtractor:
         field_cols = [c for c in df.columns if c.startswith("fields.")]
         if field_cols:
             for c in field_cols:
-                numeric["rt_" + _sanitize(c.replace("fields.", ""))] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+                feature = "rt_" + _sanitize(c.replace("fields.", ""))
+                numeric[feature] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
         else:
             # Fallback: all numeric non-metadata columns.
             for c in df.columns:
@@ -97,10 +122,11 @@ class RuntimeSysdigExtractor:
 
         if start is not None:
             relative = (ts - start).dt.total_seconds()
-            relative = relative.fillna(pd.Series(np.arange(len(df)) * self.window_seconds, index=df.index))
+            fallback = pd.Series(np.arange(len(df)) * self.window_seconds, index=df.index)
+            relative = relative.fillna(fallback)
         else:
             relative = pd.Series(np.arange(len(df)) * self.window_seconds, index=df.index)
-            ts = pd.Series(pd.NaT, index=df.index)
+            ts = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
 
         out = numeric.copy()
         out.insert(0, "relative_time_s", relative.astype(float).to_numpy())
@@ -114,9 +140,11 @@ class RuntimeSysdigExtractor:
 class ProcessSignalExtractor:
     """Extract TEP signal features aligned to runtime windows.
 
-    The extractor creates last-observation-carried-forward features per tag and
-    numeric field (`value`, `command`, `feedback`) at each sysdig window end.
-    It also adds update-count features by record type and category.
+    For each numeric field in the process stream (typically ``value``,
+    ``command`` and ``feedback``), the latest available value per tag is carried
+    forward to the sysdig window.  Optional deltas and update-count features
+    preserve simple temporal/change information without requiring sequence
+    models.
     """
 
     include_deltas: bool = True
@@ -127,24 +155,19 @@ class ProcessSignalExtractor:
         if df.empty or anchor.empty:
             return pd.DataFrame(index=anchor.index)
         time_col = infer_time_column(df)
-        if time_col is None:
+        if time_col is None or "name" not in df.columns:
             return pd.DataFrame(index=anchor.index)
+
         df["_timestamp"] = _asof_time(parse_timestamps(df[time_col]))
         df = df.dropna(subset=["_timestamp"]).sort_values("_timestamp")
         if df.empty:
             return pd.DataFrame(index=anchor.index)
 
-        # Runtime window timestamps are used as alignment anchors.
         anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
-        anchor_df = pd.DataFrame({
-            "_anchor_time": anchor_ts,
-            "_anchor_idx": np.arange(len(anchor)),
-        }).sort_values("_anchor_time")
+        anchor_df = pd.DataFrame({"_anchor_time": anchor_ts, "_anchor_idx": np.arange(len(anchor))}).sort_values("_anchor_time")
 
-        pieces = []
+        pieces: list[pd.DataFrame] = []
         numeric_fields = [c for c in ["value", "command", "feedback"] if c in df.columns]
-        if "name" not in df.columns:
-            return pd.DataFrame(index=anchor.index)
 
         for field in numeric_fields:
             temp = df[["_timestamp", "name", field]].copy()
@@ -184,7 +207,6 @@ class ProcessSignalExtractor:
         if "_timestamp" not in df.columns or anchor.empty:
             return pd.DataFrame(index=anchor.index)
         anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
-
         if len(anchor_ts) < 2:
             return pd.DataFrame(index=anchor.index)
 
@@ -227,10 +249,7 @@ class ControllerCommandExtractor:
             return pd.DataFrame(index=anchor.index)
 
         anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
-        anchor_df = pd.DataFrame({
-            "_anchor_time": anchor_ts,
-            "_anchor_idx": np.arange(len(anchor)),
-        }).sort_values("_anchor_time")
+        anchor_df = pd.DataFrame({"_anchor_time": anchor_ts, "_anchor_idx": np.arange(len(anchor))}).sort_values("_anchor_time")
 
         wide = df.pivot_table(index="_timestamp", columns="name", values="command", aggfunc="last").sort_index()
         wide.columns = [f"ctrl_last_command_{_sanitize(c)}" for c in wide.columns]
@@ -252,7 +271,6 @@ class ControllerCommandExtractor:
             delta.columns = [c.replace("ctrl_last_", "ctrl_delta_") for c in delta.columns]
             aligned = pd.concat([aligned, delta], axis=1)
 
-        # Update count per window.
         start_ts = anchor_ts.min()
         rows = []
         for ws, we in zip(anchor["window_start"], anchor["window_end"]):
@@ -265,10 +283,10 @@ class ControllerCommandExtractor:
 
 @dataclass
 class AlarmEventExtractor:
-    """Optional diagnostic alarm event features.
+    """Optional diagnostic alarm-event features.
 
-    Disabled by default in the ETFA analysis because alarm activations may
-    reflect process abnormalities rather than container/runtime attacks.
+    Disabled by default because alarm activations may reflect genuine process
+    abnormalities rather than container/runtime attacks.
     """
 
     def transform(self, run: RunData, anchor: pd.DataFrame) -> pd.DataFrame:
@@ -313,7 +331,7 @@ class MultiViewFeatureBuilder:
         runtime = RuntimeSysdigExtractor(self.window_seconds).transform(run)
         if runtime.empty:
             return pd.DataFrame()
-        pieces = []
+        pieces: list[pd.DataFrame] = []
         if self.include_runtime_features:
             pieces.append(runtime.copy())
         else:
@@ -332,7 +350,6 @@ class MultiViewFeatureBuilder:
             if not alarms.empty:
                 pieces.append(alarms)
 
-        # Deduplicate metadata columns in pieces after the first.
         base = pieces[0].reset_index(drop=True)
         for extra in pieces[1:]:
             extra = extra.reset_index(drop=True)
@@ -354,7 +371,7 @@ class MultiViewFeatureBuilder:
         base["attack_start_delay"] = run.scenario.attack_start_delay
         base["test_duration"] = run.scenario.test_duration
         base["iteration"] = run.scenario.iteration
-        reference_time = pd.to_datetime(runtime["timestamp"], utc=True).min() if "timestamp" in runtime.columns and not pd.isna(runtime["timestamp"]).all() else None
+        reference_time = _asof_time(runtime["timestamp"]).min() if "timestamp" in runtime.columns and not pd.isna(runtime["timestamp"]).all() else None
         base = add_window_labels(base, attack_intervals_from_run(run, reference_time=reference_time))
         return base
 
@@ -382,7 +399,7 @@ def infer_feature_columns(df: pd.DataFrame, prefixes: tuple[str, ...] | None = N
         Optional prefixes such as ``("rt_", "proc_", "ctrl_")`` for selecting
         a feature view.
     """
-    cols = []
+    cols: list[str] = []
     for c in df.columns:
         if c in NON_FEATURE_COLUMNS:
             continue

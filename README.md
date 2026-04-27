@@ -168,25 +168,19 @@ Default protocol:
 
 ---
 
-## Data release guidance
+## Patch v2: robustness evaluation and figure updates
 
-Do not commit large raw logs directly to Git unless Git LFS is configured. Prefer one of:
+This patch addresses the latest analysis requirements:
 
-- GitHub release archive,
-- Zenodo DOI,
-- OSF,
-- institutional data repository.
-
-At minimum, the public release should include:
-
-- this analysis code,
-- a manifest CSV,
-- checksums for data archives,
-- the exact code tag used for the paper,
-- a representative public subset if the full dataset cannot be released.
-
----
-
-## Citation
-
-Please update `CITATION.cff` once the paper metadata and public repository URL are finalized.
+- uses leave-one-clean-benign-out splits instead of one random split;
+- evaluates all configured feature views (`runtime`, `runtime_process`, `runtime_controller`, `fused`);
+- excludes training runs from primary evaluation outputs;
+- keeps validation clean-benign runs as the lambda=0 benign reference;
+- adds false-alarm rate as a percentage of benign windows;
+- keeps false alarms per hour as an additional diagnostic;
+- writes per-run metrics and pooled window-level condition metrics;
+- adds pooled-window metrics for all benign/attack windows together;
+- adds lambda=0 clean baselines for heatmap visualization;
+- generates heatmaps for all models and feature views;
+- generates score timelines for all test runs with all models shown together;
+- fixes timestamp alignment dtype issues for pandas.merge_asof.
