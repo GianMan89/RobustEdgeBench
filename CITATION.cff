@@ -1,14 +1,12 @@
 cff-version: 1.2.0
-message: "If you use this software or dataset, please cite the ETFA 2026 paper and this repository."
+message: "If you use this repository, please cite the ETFA 2026 paper and the repository release."
 title: "RobustEdgeBench: Robustness Analysis for ML-Based Container Attack Detection"
-version: "0.1.0"
+version: "0.2.0"
 date-released: "2026-04-27"
+repository-code: "https://github.com/GianMan89/RobustEdgeBench"
 authors:
   - family-names: "Manca"
     given-names: "Gianluca"
-  - family-names: "Sivanthi"
-    given-names: "Thanikesavan"
-repository-code: "https://github.com/<organization>/robustedge-bench"
 preferred-citation:
   type: conference-paper
   title: "Robustness Benchmarking of ML-Based Container Attack Detection with a Perturbation-Driven Industrial Edge Testbed"

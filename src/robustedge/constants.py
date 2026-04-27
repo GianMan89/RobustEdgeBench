@@ -1,4 +1,4 @@
-"""Shared constants for RobustEdgeBench."""
+"""Constants shared by the RobustEdgeBench analysis package."""
 
 from __future__ import annotations
 
@@ -9,10 +9,14 @@ PROFILE_TO_SEVERITY = {
     "heavy": 1.0,
 }
 
-CORE_FILES = [
-    "scenario.json",
-    "sysdig_logs.ndjson",
-]
+PHASE_ORDER = {
+    "phase1_clean_benign": 1,
+    "phase2_clean_attacked": 2,
+    "phase3_perturbed_benign": 3,
+    "phase4_perturbed_attacked": 4,
+}
+
+CORE_FILES = ["scenario.json", "sysdig_logs.ndjson"]
 
 OPTIONAL_FILES = [
     "config.json",
@@ -39,6 +43,8 @@ NON_FEATURE_COLUMNS = {
     "run_id",
     "run_dir",
     "scenario_dir",
+    "phase",
+    "phase_order",
     "iteration",
     "perturbation",
     "perturbation_family",

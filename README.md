@@ -1,84 +1,97 @@
 # RobustEdgeBench
 
-**RobustEdgeBench** is a Python/Jupyter repository for robustness analysis of ML-based container attack detection in a containerized industrial edge testbed. It assumes that a separate data-generation campaign has already produced per-run log folders (TEP-inspired telemetry, alarm events, controller commands, attack annotations, and container runtime traces). This repository focuses only on:
+**RobustEdgeBench** is a reproducible Python/Jupyter analysis repository for the ETFA 2026 robustness benchmark on **ML-based container attack detection in industrial edge systems**.
 
-1. indexing and validating generated run folders,
-2. parsing exported NDJSON and metadata files,
-3. constructing detector-ready features from runtime logs,
-4. training normal-only anomaly detectors,
+The repository assumes that the data-generation campaign has already been run. It does **not** generate telemetry or attacks. Instead, it provides reusable code for:
+
+1. indexing generated campaign folders,
+2. parsing run metadata and exported NDJSON files,
+3. extracting detector-ready features from `sysdig_logs.ndjson`, `tep_signals.ndjson`, and `tep_controller_mv_commands.ndjson`,
+4. training normal-only anomaly detection baselines,
 5. evaluating attack detection and false-alarm behavior,
-6. producing robustness curves and publication figures.
+6. generating robustness profiles, heatmaps, timelines, and paper-ready figures.
 
-The repository is designed around the ETFA 2026 paper:
-
-> Robustness Benchmarking of ML-Based Container Attack Detection with a Perturbation-Driven Industrial Edge Testbed
-
-The data-generation pipeline is intentionally **not** part of this repository.
-
----
-
-## Expected dataset layout
-
-The code expects a dataset folder with scenario directories and iteration folders, e.g.
+The code is designed for the current ABB/RUB campaign structure, including folders such as:
 
 ```text
-data/raw/logs/
-  perturbation-none_attackDuration-20_intensity-medium_20260320T052205Z/
-    iteration-1/
-      tep_signals.ndjson
-      tep_alarm_events.ndjson
-      tep_controller_mv_commands.ndjson
-      attack_records.ndjson
-      annotations.ndjson
-      sysdig_logs.ndjson
-      scenario.json
-      config.json
-      container_attack-runner.log
-      container_controller.log
-      container_grafana.log
-      container_influxdb.log
-      container_tep-simulator.log
-    iteration-2/
-      ...
-  perturbation-moderate_attackDuration-20_intensity-medium_20260320T052205Z/
-    iteration-1/
-      ...
+phase-phase1_clean_benign_perturbation-none_attackDuration-0_intensity-_20260424T191959Z/
+  iteration-1/
+    scenario.json
+    config.json
+    sysdig_logs.ndjson
+    tep_signals.ndjson
+    tep_controller_mv_commands.ndjson
+    tep_alarm_events.ndjson
+    annotations.ndjson
+    attack_records.ndjson
+    container_*.log
 ```
 
-The loader is permissive: it also accepts run folders where the files are directly in the scenario folder rather than inside an `iteration-X` folder. This is useful for early proof-of-concept campaigns.
+The public GitHub repository can host this analysis code and either the full dataset or a link to a separate dataset release.
 
 ---
 
-## Core exported files
+## Current campaign phases
 
-| File | Role in analysis |
-|---|---|
-| `scenario.json` | Run-level metadata: perturbation, attack duration/intensity, iteration, test duration, attack start delay, severity if available. |
-| `config.json` | Campaign and generator configuration. |
-| `sysdig_logs.ndjson` | Primary detector input: fixed-window syscall aggregates for the monitored container. |
-| `annotations.ndjson` | Run markers and attack windows. Used for labels when available. |
-| `attack_records.ndjson` | Attack-agent traces. Used for integrity checks and diagnostics. |
-| `tep_signals.ndjson` | PV/MV process telemetry. Used for context and optional future fusion. |
-| `tep_alarm_events.ndjson` | Alarm event stream. Used for context and optional future fusion. |
-| `tep_controller_mv_commands.ndjson` | Controller command/audit stream. Used for context and optional future fusion. |
-| `container_*.log` | Container logs for run-integrity checks and troubleshooting. |
+The current dataset naming convention is phase-aware:
 
-The first ETFA analysis focuses on `sysdig_logs.ndjson` as the primary ML input, because the detector target is runtime behavior of the InfluxDB container. Process telemetry and alarm streams are still scientifically important because their perturbations modify the database workload.
+| Phase | Meaning | Use in analysis |
+|---|---|---|
+| `phase1_clean_benign` | No attack, no perturbation | Training and validation/calibration |
+| `phase2_clean_attacked` | Attack, no perturbation | Nominal attack-detection baseline |
+| `phase3_perturbed_benign` | Perturbation, no attack | False-alarm robustness |
+| `phase4_perturbed_attacked` | Perturbation and attack | Robustness under attack |
+
+The parser extracts these fields from the folder names:
+
+- `phase`
+- `perturbation_family`, e.g. `P1`, `P2`, ...
+- `severity`, e.g. `lam0.50`
+- `attack_duration`
+- `attack_intensity`
+- timestamp
+- iteration number
+
+The parser intentionally gives priority to the folder name over older `scenario.json` fields when the JSON is less specific.
+
+---
+
+## Feature extraction
+
+The feature extraction follows the idea of the ABB zero-day container attack-detection paper: runtime features are formed from a **bag-of-system-calls** representation of `sysdig_logs.ndjson`. The current repository extends this by optionally appending process and controller context features:
+
+1. **Runtime view** (`sysdig_logs.ndjson`): syscall-count features per sysdig window.
+2. **Process view** (`tep_signals.ndjson`): last-observation-carried-forward PV/MV values aligned to each sysdig window, plus selected update-count features.
+3. **Controller view** (`tep_controller_mv_commands.ndjson`): last command values aligned to each sysdig window, plus command deltas.
+4. **Fused view**: runtime + process + controller features. This is the default because perturbations act on telemetry delivery and can affect both the database workload and observed process/controller streams.
+
+Alarm events are not included by default because alarm activation may also reflect legitimate abnormal process behavior. They can be enabled in configuration for diagnostic studies.
+
+---
+
+## Perturbation handling
+
+The current dataset contains selected perturbation severities rather than a dense grid:
+
+- P1--P5,
+- `lambda = 0.50` and `lambda = 1.00`,
+- benign and attacked robustness phases,
+- three repetitions per condition.
+
+The analysis therefore reports **discrete robustness profiles and heatmaps** rather than assuming smooth robustness curves. If future campaigns add more severity levels, the same code can plot curves.
 
 ---
 
 ## Installation
 
-Create a clean environment and install the package in editable mode:
-
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -e .[dev]
 ```
 
-Alternatively, install from `requirements.txt`:
+or:
 
 ```bash
 pip install -r requirements.txt
@@ -88,104 +101,35 @@ pip install -r requirements.txt
 
 ## Quick start
 
-### 1. Inspect the dataset
-
-```bash
-python scripts/summarize_dataset.py --data-root data/raw/logs
-```
-
-This prints the discovered runs, scenario fields, missing files, and counts by perturbation/attack settings.
-
-### 2. Run the full baseline pipeline
-
-```bash
-python scripts/run_pipeline.py \
-  --data-root data/raw/logs \
-  --output-dir outputs/etfa_baseline \
-  --target-fpr-quantile 0.995
-```
-
-The script will:
-
-1. discover runs,
-2. extract sysdig feature windows,
-3. train normal-only detectors on clean benign runs,
-4. calibrate thresholds on clean benign validation runs,
-5. evaluate all runs,
-6. write metrics, scores, robustness summaries, and figures to `outputs/etfa_baseline/`.
-
-### 3. Use the notebooks
-
-Recommended notebook order:
-
-1. `notebooks/00_dataset_overview.ipynb`
-2. `notebooks/01_preprocess_features.ipynb`
-3. `notebooks/02_train_baselines.ipynb`
-4. `notebooks/03_evaluate_robustness.ipynb`
-5. `notebooks/04_paper_figures.ipynb`
-
-The notebooks call the reusable Python classes in `src/robustedge/` and are intended for transparent scientific analysis.
-
----
-
-## Perturbation convention used by the analysis
-
-The repository supports both early categorical profiles (`none`, `light`, `moderate`, `heavy`) and continuous severity values. If a run only provides a categorical profile, the default mapping is:
-
-| Profile | Default severity |
-|---|---:|
-| `none` | 0.0 |
-| `light` | 0.25 |
-| `moderate` | 0.50 |
-| `heavy` | 1.0 |
-
-For the final benchmark, prefer explicit fields in `scenario.json`, for example:
-
-```json
-{
-  "perturbation_family": "record_loss",
-  "severity": 0.5,
-  "perturbation_parameters": {
-    "affected_tag_fraction": 0.25,
-    "drop_probability": 0.15,
-    "affected_tags": ["pv_001_feed_flow", "pv_002_recycle_flow"]
-  }
-}
-```
-
-See `docs/perturbations.md` for the detailed ETFA perturbation definitions.
-
----
-
-## Scientific protocol
-
-The default protocol is:
-
-- **Training:** clean benign runs only (`attack_duration = 0`, severity/profile = none).
-- **Validation/calibration:** disjoint clean benign runs only.
-- **Benign robustness controls:** no-attack runs under perturbations, used for false alarms per hour.
-- **Attack robustness tests:** attacked runs under the same perturbation families/severities.
-- **Primary metrics:** false alarms per hour (FA/h), event recall (ER), and time-to-detect (TTD).
-- **Secondary diagnostics:** AUROC and AUPRC.
-- **Robustness summaries:** average robustness, worst-severity robustness, and product-style robustness over a severity grid.
-
----
-
-## Outputs
-
-A typical run creates:
+Place raw generated logs under:
 
 ```text
-outputs/etfa_baseline/
-  run_index.csv
+data/raw/logs/
+```
+
+Then run:
+
+```bash
+python scripts/make_manifest.py --data-root data/raw/logs --output outputs/manifest.csv
+python scripts/summarize_dataset.py --data-root data/raw/logs
+python scripts/run_pipeline.py --data-root data/raw/logs --output-dir outputs/etfa_campaign
+```
+
+The full pipeline produces:
+
+```text
+outputs/etfa_campaign/
+  manifest.csv
   features.csv
   feature_columns.json
   metrics_by_run.csv
   scores_by_window.csv
+  metrics_aggregated.csv
   robustness_summary.csv
   figures/
-    robustness_event_recall.png
-    robustness_false_alarms_per_hour.png
+    heatmap_event_recall.png
+    heatmap_false_alarms_per_hour.png
+    robustness_profiles_event_recall.png
     timeline_example.png
   models/
     scaler.joblib
@@ -196,50 +140,53 @@ outputs/etfa_baseline/
 
 ---
 
-## Repository structure
+## Notebooks
 
-```text
-robustedge-bench/
-  README.md
-  pyproject.toml
-  requirements.txt
-  configs/
-    default.yaml
-  data/
-    README.md
-    raw/.gitkeep
-    processed/.gitkeep
-  docs/
-    dataset_schema.md
-    perturbations.md
-    evaluation_protocol.md
-    releasing_data.md
-  notebooks/
-    00_dataset_overview.ipynb
-    01_preprocess_features.ipynb
-    02_train_baselines.ipynb
-    03_evaluate_robustness.ipynb
-    04_paper_figures.ipynb
-  scripts/
-    summarize_dataset.py
-    run_pipeline.py
-  src/robustedge/
-    io.py
-    data.py
-    features.py
-    labels.py
-    models.py
-    calibration.py
-    metrics.py
-    robustness.py
-    plotting.py
-    pipeline.py
-  tests/
-    fixtures/minimal_dataset/...
-    test_discovery.py
-    test_metrics.py
-```
+Recommended order:
+
+1. `notebooks/00_dataset_overview.ipynb`
+2. `notebooks/01_feature_extraction.ipynb`
+3. `notebooks/02_train_baselines.ipynb`
+4. `notebooks/03_evaluate_robustness.ipynb`
+5. `notebooks/04_paper_figures.ipynb`
+
+All notebooks call reusable Python code from `src/robustedge/`.
+
+---
+
+## Scientific protocol
+
+Default protocol:
+
+- Train on `phase1_clean_benign`.
+- Split clean benign runs at run level into training and calibration.
+- Evaluate nominal clean attacks on `phase2_clean_attacked`.
+- Evaluate false-alarm robustness on `phase3_perturbed_benign`.
+- Evaluate attacked robustness on `phase4_perturbed_attacked`.
+- Report FA/h, event recall, TTD, AUROC/AUPRC.
+- Report discrete robustness heatmaps by perturbation family and severity.
+
+---
+
+## Data release guidance
+
+Do not commit large raw logs directly to Git unless Git LFS is configured. Prefer one of:
+
+- GitHub release archive,
+- Zenodo DOI,
+- OSF,
+- institutional data repository.
+
+At minimum, the public release should include:
+
+- this analysis code,
+- a manifest CSV,
+- checksums for data archives,
+- the exact code tag used for the paper,
+- a representative public subset if the full dataset cannot be released.
+
+---
 
 ## Citation
 
-A `CITATION.cff` file is included as a placeholder. Please update title, authors, DOI, and repository URL once the public release is finalized.
+Please update `CITATION.cff` once the paper metadata and public repository URL are finalized.

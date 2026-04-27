@@ -1,11 +1,11 @@
 {
-  "perturbation": "moderate",
-  "perturbation_family": "moderate",
-  "perturbation_profile": "moderate",
+  "phase": "phase4_perturbed_attacked",
+  "perturbation": "P2",
+  "perturbation_family": "P2",
   "severity": 0.5,
   "attack_duration": 20,
   "attack_intensity": "medium",
-  "iteration": 1,
+  "iteration": 3,
   "test_duration": 120,
   "attack_start_delay": 40
 }

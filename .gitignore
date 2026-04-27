@@ -1,31 +1,18 @@
-# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Environments
 .venv/
 venv/
-.env
-
-# Notebooks
 .ipynb_checkpoints/
+.DS_Store
+Thumbs.db
 
-# Data and outputs
 /data/raw/**
 !/data/raw/.gitkeep
 /data/processed/**
 !/data/processed/.gitkeep
 /outputs/**
 !/outputs/.gitkeep
-
-# Models
 *.joblib
 *.pkl
-
-# OS
-.DS_Store
-Thumbs.db

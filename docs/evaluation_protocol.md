@@ -1,44 +1,36 @@
 # Evaluation protocol
 
-## Splits
+## Phases
 
-1. **Training:** clean benign runs only (`attack_duration = 0`, severity 0/profile `none`).
-2. **Validation:** disjoint clean benign runs only, used for threshold calibration.
-3. **Benign robustness controls:** no-attack perturbed runs, used for false alarms per hour.
-4. **Attack robustness tests:** attacked runs under perturbation families and severity sweeps.
+- Phase 1: clean benign, used for training/calibration.
+- Phase 2: clean attacked, used for nominal attack-detection baseline.
+- Phase 3: perturbed benign, used for false-alarm robustness.
+- Phase 4: perturbed attacked, used for robustness under attack.
 
-Splits are performed at run level, never at window level, to avoid temporal leakage.
+## Current severity grid
 
-## Primary metrics
+The current campaign contains selected severity values (`0.50`, `1.00`) rather than a dense grid. The repository therefore emphasizes:
 
-- **False alarms per hour (FA/h):** evaluated on benign runs.
-- **Event recall (ER):** attack event is detected if at least one alarm is raised during the attack interval.
-- **Time-to-detect (TTD):** time between attack onset and first detector alarm during the attack interval.
+- robustness profiles,
+- family/severity heatmaps,
+- tabular summaries over available severity points.
 
-## Secondary metrics
+If future data include more severity levels, the same code can produce curves.
 
-- AUROC
-- AUPRC
-- Window-level precision/recall/F1/MCC when useful
+## Metrics
 
-## Robustness curves
+Primary:
 
-For detector `m`, perturbation family `r`, severity `lambda`, and metric `M`, report:
+- false alarms per hour,
+- event recall,
+- time-to-detect.
 
-```text
-M_{m,r}(lambda)
-```
+Secondary:
 
-with mean and dispersion across repetitions. The primary figures should show metric versus severity.
+- AUROC,
+- AUPRC,
+- window-level precision/recall/F1/MCC.
 
-## Scalar robustness summaries
+## Splitting
 
-For higher-is-better metrics, the repository computes:
-
-```text
-R_avg   = average over severity grid
-R_worst = minimum over severity grid
-R_prod  = geometric mean over severity grid (with epsilon)
-```
-
-For lower-is-better metrics such as FA/h and TTD, the repository reports the raw curves and optional transformed summaries.
+Default training and calibration use only `phase1_clean_benign`. Splits are run-level. All other phases are test data.

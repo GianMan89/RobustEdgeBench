@@ -1,53 +1,43 @@
 # Dataset schema
 
-This repository expects generated campaign logs. It does not generate data.
-
-## Scenario folders
-
-Scenario folders are named descriptively, for example:
+The current campaign uses folders such as:
 
 ```text
-perturbation-moderate_attackDuration-20_intensity-medium_20260320T052205Z
+phase-phase4_perturbed_attacked_perturbation-P2_lam0.50_attackDuration-20_intensity-medium_20260426T043520Z/
+  iteration-3/
+    scenario.json
+    config.json
+    sysdig_logs.ndjson
+    tep_signals.ndjson
+    tep_controller_mv_commands.ndjson
+    tep_alarm_events.ndjson
+    annotations.ndjson
+    attack_records.ndjson
+    container_*.log
 ```
 
-Inside each scenario folder, there may be one or more iteration folders:
+## Parsed folder fields
 
-```text
-iteration-1/
-iteration-2/
-iteration-3/
-```
+The parser extracts:
 
-A valid iteration folder should contain at least `scenario.json` and `sysdig_logs.ndjson`.
+- `phase`: e.g. `phase1_clean_benign`, `phase2_clean_attacked`,
+- `perturbation_family`: `none`, `P1`, `P2`, `P3`, `P4`, `P5`,
+- `severity`: numeric value from `lam0.50`, if present,
+- `attack_duration`: numeric seconds,
+- `attack_intensity`: e.g. `medium` or empty string,
+- timestamp,
+- `iteration`: from `iteration-X`.
 
-## Required metadata fields
+The parser gives priority to folder-derived fields because early `scenario.json` files may still contain older categorical perturbation labels such as `moderate`.
 
-The loader can infer some fields from folder names, but `scenario.json` should preferably contain:
+## Primary detector inputs
 
-```json
-{
-  "perturbation": "moderate",
-  "perturbation_family": "record_loss",
-  "severity": 0.5,
-  "attack_duration": 20,
-  "attack_intensity": "medium",
-  "iteration": 3,
-  "test_duration": 3600,
-  "attack_start_delay": 263,
-  "perturbation_parameters": {
-    "affected_tag_fraction": 0.25,
-    "drop_probability": 0.15,
-    "affected_tags": ["pv_001_feed_flow"]
-  }
-}
-```
+- Runtime view: `sysdig_logs.ndjson`
+- Process view: `tep_signals.ndjson`
+- Controller view: `tep_controller_mv_commands.ndjson`
 
-Early campaigns may contain only categorical fields such as `perturbation = moderate`. In that case, the analysis uses the default profile-to-severity mapping in `configs/default.yaml`.
+Alarm events are not included by default but can be enabled for diagnostics.
 
-## Timestamps
+## Timestamp handling
 
-The code accepts several common timestamp column names: `time`, `timestamp`, `ts`, `datetime`, `window_start`, and nested variants after JSON normalization. If timestamps are missing from `sysdig_logs.ndjson`, window times are inferred from row index and the configured sysdig window size.
-
-## NDJSON flexibility
-
-The NDJSON parser supports both flat and nested records. Nested fields such as `tags`, `fields`, `counts`, or `syscalls` are flattened using dot notation, e.g. `counts.write`.
+The code supports Unix nanoseconds, Unix milliseconds, Unix seconds, and ISO timestamps.
