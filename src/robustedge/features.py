@@ -30,6 +30,40 @@ def _relative_times_from_df(df: pd.DataFrame, fallback_window_seconds: float) ->
     start = ts.min() if not ts.isna().all() else None
     return ts, start
 
+def _asof_time(series: pd.Series) -> pd.Series:
+    """Normalize timestamps for pandas.merge_asof.
+
+    pandas.merge_asof requires exactly matching datetime dtypes on the
+    left and right merge keys. Depending on JSON parsing and pandas version,
+    timestamps may become datetime64[ns, UTC] in one stream and
+    datetime64[us, UTC] in another. We normalize all merge keys to
+    timezone-naive UTC nanoseconds.
+    """
+    ts = pd.to_datetime(series, utc=True, errors="coerce")
+
+    # Convert timezone-aware UTC timestamps to timezone-naive UTC.
+    if pd.api.types.is_datetime64tz_dtype(ts.dtype):
+        ts = ts.dt.tz_convert("UTC").dt.tz_localize(None)
+
+    return ts.astype("datetime64[ns]")
+
+
+def _anchor_times(anchor: pd.DataFrame, fallback_start: pd.Timestamp) -> pd.Series:
+    """Return merge-ready anchor timestamps for feature alignment.
+
+    If the runtime anchor contains valid timestamps, use them. Otherwise,
+    reconstruct anchor timestamps from the fallback start time and window_end.
+    """
+    if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all():
+        anchor_ts = _asof_time(anchor["timestamp"])
+        if anchor_ts.notna().all():
+            return anchor_ts
+
+    return pd.Series(
+        fallback_start + pd.to_timedelta(anchor["window_end"].to_numpy(), unit="s"),
+        index=anchor.index,
+    ).astype("datetime64[ns]")
+
 
 @dataclass
 class RuntimeSysdigExtractor:
@@ -72,7 +106,7 @@ class RuntimeSysdigExtractor:
         out.insert(0, "relative_time_s", relative.astype(float).to_numpy())
         out.insert(1, "window_start", out["relative_time_s"])
         out.insert(2, "window_end", out["relative_time_s"] + self.window_seconds)
-        out.insert(3, "timestamp", ts.to_numpy())
+        out.insert(3, "timestamp", _asof_time(ts))
         return out.reset_index(drop=True)
 
 
@@ -95,18 +129,17 @@ class ProcessSignalExtractor:
         time_col = infer_time_column(df)
         if time_col is None:
             return pd.DataFrame(index=anchor.index)
-        df["_timestamp"] = parse_timestamps(df[time_col])
+        df["_timestamp"] = _asof_time(parse_timestamps(df[time_col]))
         df = df.dropna(subset=["_timestamp"]).sort_values("_timestamp")
         if df.empty:
             return pd.DataFrame(index=anchor.index)
 
         # Runtime window timestamps are used as alignment anchors.
-        if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all():
-            anchor_ts = pd.to_datetime(anchor["timestamp"], utc=True)
-        else:
-            start = df["_timestamp"].min()
-            anchor_ts = start + pd.to_timedelta(anchor["window_end"], unit="s")
-        anchor_df = pd.DataFrame({"_anchor_time": anchor_ts, "_anchor_idx": np.arange(len(anchor))}).sort_values("_anchor_time")
+        anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
+        anchor_df = pd.DataFrame({
+            "_anchor_time": anchor_ts,
+            "_anchor_idx": np.arange(len(anchor)),
+        }).sort_values("_anchor_time")
 
         pieces = []
         numeric_fields = [c for c in ["value", "command", "feedback"] if c in df.columns]
@@ -121,7 +154,17 @@ class ProcessSignalExtractor:
                 continue
             wide = temp.pivot_table(index="_timestamp", columns="name", values=field, aggfunc="last").sort_index()
             wide.columns = [f"proc_last_{_sanitize(c)}_{field}" for c in wide.columns]
-            aligned = pd.merge_asof(anchor_df, wide.reset_index(), left_on="_anchor_time", right_on="_timestamp", direction="backward")
+            wide_reset = wide.reset_index()
+            wide_reset["_timestamp"] = _asof_time(wide_reset["_timestamp"])
+            wide_reset = wide_reset.dropna(subset=["_timestamp"]).sort_values("_timestamp")
+
+            aligned = pd.merge_asof(
+                anchor_df,
+                wide_reset,
+                left_on="_anchor_time",
+                right_on="_timestamp",
+                direction="backward",
+            )
             aligned = aligned.sort_values("_anchor_idx").drop(columns=[c for c in ["_timestamp", "_anchor_time", "_anchor_idx"] if c in aligned.columns])
             aligned = aligned.ffill().fillna(0.0)
             if self.include_deltas:
@@ -140,18 +183,14 @@ class ProcessSignalExtractor:
     def _update_counts(self, df: pd.DataFrame, anchor: pd.DataFrame) -> pd.DataFrame:
         if "_timestamp" not in df.columns or anchor.empty:
             return pd.DataFrame(index=anchor.index)
-        if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all():
-            anchor_ts = pd.to_datetime(anchor["timestamp"], utc=True)
-            if len(anchor_ts) < 2:
-                return pd.DataFrame(index=anchor.index)
-            # Use anchor window starts and ends.
-            start_ts = anchor_ts.min()
-            start_edges = start_ts + pd.to_timedelta(anchor["window_start"], unit="s")
-            end_edges = start_ts + pd.to_timedelta(anchor["window_end"], unit="s")
-        else:
-            start_ts = df["_timestamp"].min()
-            start_edges = start_ts + pd.to_timedelta(anchor["window_start"], unit="s")
-            end_edges = start_ts + pd.to_timedelta(anchor["window_end"], unit="s")
+        anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
+
+        if len(anchor_ts) < 2:
+            return pd.DataFrame(index=anchor.index)
+
+        start_ts = anchor_ts.min()
+        start_edges = start_ts + pd.to_timedelta(anchor["window_start"], unit="s")
+        end_edges = start_ts + pd.to_timedelta(anchor["window_end"], unit="s")
 
         rows = []
         for s, e in zip(start_edges, end_edges):
@@ -181,22 +220,31 @@ class ControllerCommandExtractor:
         time_col = infer_time_column(df)
         if time_col is None or "name" not in df.columns or "command" not in df.columns:
             return pd.DataFrame(index=anchor.index)
-        df["_timestamp"] = parse_timestamps(df[time_col])
+        df["_timestamp"] = _asof_time(parse_timestamps(df[time_col]))
         df["command"] = pd.to_numeric(df["command"], errors="coerce")
         df = df.dropna(subset=["_timestamp", "command"]).sort_values("_timestamp")
         if df.empty:
             return pd.DataFrame(index=anchor.index)
 
-        if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all():
-            anchor_ts = pd.to_datetime(anchor["timestamp"], utc=True)
-        else:
-            start = df["_timestamp"].min()
-            anchor_ts = start + pd.to_timedelta(anchor["window_end"], unit="s")
-        anchor_df = pd.DataFrame({"_anchor_time": anchor_ts, "_anchor_idx": np.arange(len(anchor))}).sort_values("_anchor_time")
+        anchor_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min())
+        anchor_df = pd.DataFrame({
+            "_anchor_time": anchor_ts,
+            "_anchor_idx": np.arange(len(anchor)),
+        }).sort_values("_anchor_time")
 
         wide = df.pivot_table(index="_timestamp", columns="name", values="command", aggfunc="last").sort_index()
         wide.columns = [f"ctrl_last_command_{_sanitize(c)}" for c in wide.columns]
-        aligned = pd.merge_asof(anchor_df, wide.reset_index(), left_on="_anchor_time", right_on="_timestamp", direction="backward")
+        wide_reset = wide.reset_index()
+        wide_reset["_timestamp"] = _asof_time(wide_reset["_timestamp"])
+        wide_reset = wide_reset.dropna(subset=["_timestamp"]).sort_values("_timestamp")
+
+        aligned = pd.merge_asof(
+            anchor_df,
+            wide_reset,
+            left_on="_anchor_time",
+            right_on="_timestamp",
+            direction="backward",
+        )
         aligned = aligned.sort_values("_anchor_idx").drop(columns=[c for c in ["_timestamp", "_anchor_time", "_anchor_idx"] if c in aligned.columns])
         aligned = aligned.ffill().fillna(0.0)
         if self.include_deltas:
@@ -230,10 +278,11 @@ class AlarmEventExtractor:
         time_col = infer_time_column(df)
         if time_col is None:
             return pd.DataFrame(index=anchor.index)
-        df["_timestamp"] = parse_timestamps(df[time_col]).dropna()
+        df["_timestamp"] = _asof_time(parse_timestamps(df[time_col]))
+        df = df.dropna(subset=["_timestamp"])
         if df.empty:
             return pd.DataFrame(index=anchor.index)
-        start_ts = pd.to_datetime(anchor["timestamp"], utc=True).min() if "timestamp" in anchor.columns and not pd.isna(anchor["timestamp"]).all() else df["_timestamp"].min()
+        start_ts = _anchor_times(anchor, fallback_start=df["_timestamp"].min()).min()
         rows = []
         for ws, we in zip(anchor["window_start"], anchor["window_end"]):
             s = start_ts + pd.to_timedelta(ws, unit="s")
